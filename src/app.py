@@ -1,7 +1,7 @@
 import logging
 import cv2
+import time
 from core.color import *
-from core.shape import *
 
 
 KEY_CODE_ESC = 27
@@ -12,13 +12,18 @@ capture: cv2.VideoCapture
 
 def setup():
     global capture
+    start_time = time.time()
+    frame_cnt = 0
     capture = cv2.VideoCapture(0)
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 240)
     while cv2.waitKey(33) != KEY_CODE_ESC:
         loop()
+        frame_cnt+=1
     capture.release()
     cv2.destroyAllWindows()
+    end_time = time.time()
+    print(f'Result: {frame_cnt} frames, {end_time-start_time} seconds, {frame_cnt/(end_time-start_time):.2f} fps')
 
 
 def loop():
@@ -44,10 +49,10 @@ def proc(frame: np.ndarray):
     gray_image = cv2.GaussianBlur(gray_image, ksize=(5,5), sigmaX=1)
 
     # 임계값 처리 (흰 배경 = 낮은 채도이므로 가능한 알고리즘)
-    bin_frame = cv2.threshold(gray_image, thresh=25, maxval=255, type=cv2.THRESH_BINARY)[1]
+    bin_frame = cv2.threshold(gray_image, thresh=40, maxval=255, type=cv2.THRESH_BINARY)[1]
 
     # 모폴로지 침식 연산을 통한 노이즈 감소
-    bin_frame = cv2.erode(bin_frame, kernel=(3,3), iterations=4)
+    bin_frame = cv2.erode(bin_frame, kernel=(5,5), iterations=2)
 
     # 마스크 이미지 생성 (윤곽선 검출 -> 내부 공간 채우기)
     mask_image = np.zeros_like(bin_frame)
