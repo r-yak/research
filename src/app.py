@@ -1,13 +1,24 @@
+import functools
 import logging
-import cv2
+import math
 import time
-from core.color import *
+import typing
+
+import cv2
+import colorgram
+import numpy as np
+import webcolors
+from PIL import Image
 
 
 KEY_CODE_ESC = 27
 
 logger = logging.Logger('app')
 capture: cv2.VideoCapture
+
+
+CONTOUR_APPROX = 0.04
+CIRCLE_MOMENTUM_THRESH = 7
 
 
 def setup():
@@ -38,86 +49,132 @@ def loop():
 
 
 def proc(frame: np.ndarray):
-    # 채도에 대한 채널만 추출
+    frame = get_center_square(frame)
+    cv2.imshow('RESULT', frame)
+
     hsv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    gray_image = cv2.split(hsv_image)[1]
-
-    # 빠른 처리속도를 위해 다운샘플링
-    gray_image = cv2.resize(gray_image, dsize=(256, 256))
-
-    # 블러링을 통한 노이즈 감소
-    gray_image = cv2.GaussianBlur(gray_image, ksize=(5,5), sigmaX=1)
-
-    # 임계값 처리 (흰 배경 = 낮은 채도이므로 가능한 알고리즘)
-    bin_frame = cv2.threshold(gray_image, thresh=40, maxval=255, type=cv2.THRESH_BINARY)[1]
-
-    # 모폴로지 침식 연산을 통한 노이즈 감소
-    bin_frame = cv2.erode(bin_frame, kernel=(5,5), iterations=2)
-
-    # 마스크 이미지 생성 (윤곽선 검출 -> 내부 공간 채우기)
-    mask_image = np.zeros_like(bin_frame)
-    contours = cv2.findContours(bin_frame, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE)[-2]
-    cv2.drawContours(mask_image, contours, contourIdx=-1, color=255, thickness=-1)
-
-    # 마스킹 처리를 위해 업샘플링으로 크기 복구
-    mask_image = cv2.resize(mask_image, dsize=frame.shape[1::-1])
-
-    # 마스킹 처리 (유색 알약만 추출 됨)
-    colored_pill_image = cv2.copyTo(frame, mask_image)
-
-    # 알약의 색 검출
-    colors = extract_colors(colored_pill_image, 2)
-
-    if len(colors) < 2:
-        logger.warning('알약이 검출되지 않았습니다.')
-        primary_color = colorgram.Color(0, 0, 0, 1.0) # black
+    if is_colored_pill(frame):
+        gray_image = hsv_image[:,:,1]
     else:
-        logger.info('알약이 검출되었습니다.')
-        background_color = colors[0] # in the most cases, black.
-        primary_color = colors[1]
+        gray_image = hsv_image[:,:,2]
 
-    # 결과 출력
-    row1 = np.hstack([frame, colored_pill_image])
-    row2 = np.zeros_like(row1)
-    row2[:,:] = primary_color.rgb[::-1] # RGB->BGR
+    bin_image = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[-1]
+    bin_image = cv2.morphologyEx(bin_image, cv2.MORPH_OPEN, get_morph_kernel())
+    bin_image = cv2.morphologyEx(bin_image, cv2.MORPH_CLOSE, get_morph_kernel())
 
-    cv2.imshow('RESULT', np.vstack([row1, row2]))
+    pill_image = cv2.copyTo(frame, bin_image)
+    pill_raw_color = extract_pill_color(pill_image)
+
+    if pill_raw_color is None:
+        logger.warning('감지된 색상이 없습니다.')
+        return
+
+    pill_color_name, pill_color = get_closest_colorname(pill_raw_color)
+
+    contours = cv2.findContours(bin_image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    logger.info(f'{len(contours)} contours found.')
+    if len(contours) > 1:
+        logger.warning('아직 동시에 여러 개의 알약은 검출하기 어렵습니다.')
+        return
+
+    shape_name, shape_image = detect_shape(bin_image)
+
+    out_frame = np.hstack([frame, shape_image], dtype=np.uint8)
+    out_frame = np.vstack([out_frame, np.full((32, out_frame.shape[1], 3), pill_color[::-1], dtype=np.uint8)], dtype=np.uint8)
+    out_frame = cv2.putText(out_frame, pill_color_name, (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+    out_frame = cv2.putText(out_frame, shape_name, (520, 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+    cv2.imshow('RESULT', out_frame)
 
 
-def extract_colors(bgr_frame: np.ndarray, number_of_colors:int=6) -> typing.List[colorgram.Color]:
+def get_center_square(frame: np.ndarray) -> np.ndarray:
+    center_y, center_x = frame.shape[0]/2, frame.shape[1]/2
+    radius = 0.4 * min(frame.shape[:2])
+    y_min = int(center_y-radius)
+    y_max = int(center_y+radius)
+    x_min = int(center_x-radius)
+    x_max = int(center_x+radius)
+    return cv2.resize(frame[y_min:y_max, x_min:x_max, :], (512, 512))
+
+
+def is_colored_pill(frame: np.ndarray) -> bool:
+    # TODO
+    return True
+
+
+@functools.cache
+def get_morph_kernel() -> np.ndarray:
+    return np.ones((9,9))
+
+
+def extract_pill_color(bgr_frame: np.ndarray) -> typing.Optional[typing.Tuple[int]]:
     # colorgram.extract()는 이미지 크기에 비례한 수행시간을 필요로 하여
     # 이미지의 크기를 64x64로 다운샘플링하여 실시간 처리가 가능하도록 함.
     rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-    down_sample_dst_size = (64, 64)
-    down_sampled_frame = cv2.resize(rgb_frame, down_sample_dst_size)
-    pil_image = Image.fromarray(down_sampled_frame)
-    return colorgram.extract(pil_image, number_of_colors)
+    rgb_frame = cv2.resize(rgb_frame, (64, 64))
+    pil_image = Image.fromarray(rgb_frame)
+    colors = colorgram.extract(pil_image, number_of_colors=2)
+    if len(colors) < 2:
+        return None
+    return colors[1].rgb
 
 
-def make_pallete(colors: typing.List[colorgram.Color]) -> np.ndarray:
-    size = 64
-    frame = np.zeros((size, size * len(colors), 3), dtype=np.uint8)
-    for i, color in enumerate(colors):
-        frame[:, size*i:size*(i+1)] = color.rgb
-    return frame
+@functools.cache
+def get_closest_colorname(color: webcolors.IntegerRGB) -> typing.Tuple[str, webcolors.IntegerRGB]:
+    sample_colors = {
+        'white': webcolors.hex_to_rgb('#ffffff'),
+        'yellow': webcolors.hex_to_rgb('#ffeb3b'),
+        'orange': webcolors.hex_to_rgb('#ff9800'),
+        'pink': webcolors.hex_to_rgb('#ff65d5'),
+        'red': webcolors.hex_to_rgb('#ba000d'),
+        'brown': webcolors.hex_to_rgb('#964b00'),
+        'lime': webcolors.hex_to_rgb('#7fe325'),
+        'green': webcolors.hex_to_rgb('#006e1f'),
+        'bluegreen': webcolors.hex_to_rgb('#0080a9'),
+        'blue': webcolors.hex_to_rgb('#4269ff'),
+        'navy': webcolors.hex_to_rgb('#1028ad'),
+        'wine': webcolors.hex_to_rgb('#b90076'),
+        'purple': webcolors.hex_to_rgb('#9b00b5'),
+        # 'gray': webcolors.hex_to_rgb('#9e9e9e'),
+        # 'black': webcolors.hex_to_rgb('#000000'),
+    }
+    def calc_dist(c1: webcolors.IntegerRGB, c2: webcolors.IntegerRGB) -> float:
+        return math.sqrt(sum(map(lambda x: ((x[0]-x[1])**2), zip(c1, c2))))
+    closest_colors = sorted(sample_colors.items(), key=lambda c: calc_dist(c[1], color))
+    return closest_colors[0]
 
 
-def freq_2d_filter(gray: np.ndarray, filter: np.ndarray) -> np.ndarray:
-    if len(gray.shape) != 2:
-        raise ValueError()
-    fft = np.fft.fft2(np.float32(gray))
-    fft_shift = np.fft.fftshift(fft)
-    fft_ishift = np.fft.ifftshift(fft_shift * filter)
-    ifft = np.fft.ifft2(fft_ishift)
-    return np.uint8(cv2.magnitude(ifft.real, ifft.imag))
+def detect_shape(bin_frame: np.ndarray) -> typing.Tuple[str, np.ndarray]:
+    out_frame = np.zeros((512, 512, 3), dtype=np.uint8)
+    out_frame[bin_frame == 255, :] = 255
 
+    contours = cv2.findContours(bin_frame, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[-2]
 
-def gaussian_2d_filter(shape: typing.Tuple[int], radius: int) -> np.ndarray:
-    h, w = shape[:2]
-    cy, cx = h/2, w/2
-    X, Y = np.meshgrid(np.linspace(1, w, w), np.linspace(1, h, h))
-    out = np.exp(-(np.power(X-cx,2)+np.power(Y-cy,2))/(2*np.power(radius,2)))
-    return out
+    logger.info(f'{len(contours)} contours found.')
+
+    if len(contours) > 1:
+        logger.warning('아직 동시에 여러 개의 알약은 검출하기 어렵습니다.')
+        return 'not detected', out_frame
+
+    contour = contours[0]
+    approx = cv2.approxPolyDP(contour, CONTOUR_APPROX * cv2.arcLength(contour, True), True)
+    n_approx = len(approx)  # 꼭짓점의 개수
+
+    cv2.drawContours(out_frame, [contour], 0, (0, 0, 0), 2)
+    for apr in approx:
+        cv2.circle(out_frame, apr[0], radius=3, color=(0, 255, 0), thickness=2)
+
+    if n_approx == 3:
+        return 'triangle', out_frame
+    elif n_approx == 4:
+        return 'quadrilateral', out_frame
+    elif n_approx == 5:
+        return 'pentagon', out_frame
+    elif n_approx < CIRCLE_MOMENTUM_THRESH:
+        logger.info(f'{n_approx} points detected.')
+        return 'oval? rectangular?', out_frame
+    else:
+        logger.info(f'{n_approx} points detected.')
+        return 'circle??', out_frame
 
 
 if __name__ == '__main__':
