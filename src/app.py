@@ -56,6 +56,7 @@ def proc(frame: np.ndarray):
     if is_colored_pill(frame):
         gray_image = hsv_image[:,:,1]
     else:
+        logger.warning('색상이 없어, 밝기로 대체합니다.')
         gray_image = hsv_image[:,:,2]
 
     bin_image = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[-1]
@@ -97,8 +98,7 @@ def get_center_square(frame: np.ndarray) -> np.ndarray:
 
 
 def is_colored_pill(frame: np.ndarray) -> bool:
-    # TODO
-    return True
+    return np.max(cv2.split(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV))[1]) > 90
 
 
 @functools.cache
