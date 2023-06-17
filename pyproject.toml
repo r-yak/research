@@ -10,6 +10,8 @@ python = "^3.11"
 opencv-python = "^4.7.0.72"
 colorgram-py = "^1.2.0"
 pillow = "^9.5.0"
+webcolors = "^1.13"
+numpy = "^1.24.3"
 
 
 [build-system]
