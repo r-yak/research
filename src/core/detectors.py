@@ -1,5 +1,6 @@
 import math
 import logging
+import typing
 
 import webcolors
 import numpy as np
@@ -33,7 +34,7 @@ class ColorDetector:
             self.actual_color = self._find_color(bgr_image)
         except ColorNotDetectedException:
             return Color.NONE
-        return sorted(Color, key=lambda c: self._calc_3d_dist(c.value, self.actual_color) if c is not Color.NONE else 9999999)[0]
+        return self._find_by_rgb_distance()
 
     def _find_color(self, bgr_image: np.ndarray) -> webcolors.IntegerRGB:
         rgb_frame = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
@@ -45,8 +46,19 @@ class ColorDetector:
             raise ColorNotDetectedException()
         return colors[1].rgb
 
-    def _calc_3d_dist(self, c1: webcolors.IntegerRGB, c2: webcolors.IntegerRGB) -> float:
-        return math.sqrt(sum(map(lambda x: ((x[0]-x[1])**2), zip(c1, c2))))
+    def _find_by_uv_distance(self):
+        return sorted(Color, key=lambda c: self._calc_uv_dist(c.value, self.actual_color))[0]
+
+    def _calc_uv_dist(self, c1: webcolors.IntegerRGB, c2: webcolors.IntegerRGB) -> float:
+        yuv = cv2.cvtColor(np.array([[c1, c2]], dtype=np.uint8), cv2.COLOR_RGB2YUV)
+        c1, c2 = yuv[0,:,1:]
+        return self._calc_nd_dist(c1, c2)
+
+    def _find_by_rgb_distance(self):
+        return sorted(Color, key=lambda c: self._calc_nd_dist(c.value, self.actual_color))[0]
+
+    def _calc_nd_dist(self, v1: typing.Iterable[int], v2: typing.Iterable[int]) -> float:
+        return math.sqrt(sum(map(lambda x: ((x[0]-x[1])**2), zip(v1, v2))))
 
 
 class ShapeDetector:

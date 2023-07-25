@@ -6,7 +6,7 @@ import numpy as np
 
 from core.detectors import shapeDetector, colorDetector
 from core.normalizers import shapeNormalizer, colorNormalizer
-from core.segmentations import by_saturation
+from core.segmentations import *
 
 logger = logging.Logger('app')
 logger.setLevel(logging.DEBUG)
@@ -57,7 +57,7 @@ def proc(raw_frame: np.ndarray):
     frame = shapeNormalizer.normalize(raw_frame)
     frame = colorNormalizer.normalize(frame)
 
-    mask_image = by_saturation(frame)
+    mask_image = by_edge_detection(frame)
     pill_image = cv2.copyTo(frame, mask_image)
 
     color = colorDetector.detect(pill_image)
